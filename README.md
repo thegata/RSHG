@@ -5,7 +5,7 @@
 ### Игра полная мрака и другой хуйни на Unity в СНГ сетинге
 
 <img src="https://img.shields.io/badge/Engine-Unity-black?style=for-the-badge&logo=unity" />
-<img src="https://img.shields.io/badge/Genre-Horror-red?style=for-the-badge" />
+<img src="https://img.shields.io/badge/Genre-FPS/HORROR-red?style=for-the-badge" />
 <img src="https://img.shields.io/badge/Status-In%20Development-orange?style=for-the-badge" />
 <img src="https://img.shields.io/github/languages/top/USERNAME/RSHG?style=for-the-badge" />
 

@@ -2,7 +2,7 @@
 
 # RSHG
 
-### A dark psychological horror game made with Unity
+### Игра полная мрака и другой хуйни на Unity в СНГ сетинге
 
 <img src="https://img.shields.io/badge/Engine-Unity-black?style=for-the-badge&logo=unity" />
 <img src="https://img.shields.io/badge/Genre-Horror-red?style=for-the-badge" />
@@ -11,32 +11,32 @@
 
 ---
 
-> “Some doors should never be opened.”
+> “Никому не доверяй.”
 
 </div>
 
 ## 🎮 About The Project
 
-**RSHG** is a dark atmospheric horror game developed in **Unity**.  
-The game focuses on psychological tension, immersive exploration, unsettling environments, and survival elements.
+**RSHG** это игра от интузиастов на **Unity**.  
+Эта игра не оставит никого равнодушным, так что всем сосать))
 
-Players will uncover disturbing secrets while navigating through abandoned locations filled with mystery, fear, and danger.
-
----
-
-## ✨ Features
-
-- 🩸 Psychological horror atmosphere
-- 🔦 Immersive first-person gameplay
-- 🎧 Dark ambient sound design
-- 🕯️ Realistic lighting and shadows
-- 🧩 Exploration & environmental storytelling
-- 👁️ Unpredictable events and scares
-- 💀 Survival mechanics
+P.S Сергей-Гей
 
 ---
 
-## 📸 Screenshots
+## ✨ Приколы
+
+- 🩸 Кишки и мясо
+- 🔦 Интерактивный геймплей
+- 🎧 Самая ахуенная атмостфера
+- 🕯️ Реалистичный свет и Графон
+- 🧩 Выживания
+- 👁️ Ты будешь бояться...
+- 💀 Выживи или Умри
+
+---
+
+## 📸 Скриншоты
 
 > Add screenshots here
 

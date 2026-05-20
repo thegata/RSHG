@@ -37,6 +37,17 @@ public class FirstPersonController : MonoBehaviour
     [SerializeField] private float crouchHeight = 1.05f;
     [SerializeField] private float crouchTransition = 12f;
     [SerializeField] private LayerMask ceilingMask = ~0;
+    [Tooltip("На сколько метров опускается камера при приседе.")]
+    [SerializeField] private float crouchCameraDip = 0.7f;
+    [SerializeField] private float crouchCameraSmoothing = 9f;
+
+    [Header("Lean (Q / E)")]
+    [SerializeField] private float leanAngle = 14f;
+    [SerializeField] private float leanOffset = 0.42f;
+    [SerializeField] private float leanSmoothing = 10f;
+    [SerializeField] private bool leanCollisionCheck = true;
+    [SerializeField] private float leanCollisionRadius = 0.2f;
+    [SerializeField] private LayerMask leanCollisionMask = ~0;
 
     [Header("Head Bob")]
     [SerializeField] private float walkBobFrequency = 8.5f;
@@ -80,6 +91,8 @@ public class FirstPersonController : MonoBehaviour
     private InputAction jumpAction;
     private InputAction sprintAction;
     private InputAction crouchAction;
+    private InputAction leanLeftAction;
+    private InputAction leanRightAction;
 
     private Vector3 horizontalVelocity;
     private float verticalVelocity;
@@ -103,6 +116,8 @@ public class FirstPersonController : MonoBehaviour
     private float idleTimer;
     private float currentTilt;
     private float landingOffset;
+    private float crouchBlend;
+    private float currentLean;
 
     private void Awake()
     {
@@ -155,6 +170,12 @@ public class FirstPersonController : MonoBehaviour
 
         crouchAction = new InputAction("Crouch", InputActionType.Button, binding: "<Keyboard>/c");
         crouchAction.AddBinding("<Gamepad>/buttonEast");
+
+        leanLeftAction = new InputAction("LeanLeft", InputActionType.Button, binding: "<Keyboard>/q");
+        leanLeftAction.AddBinding("<Gamepad>/leftShoulder");
+
+        leanRightAction = new InputAction("LeanRight", InputActionType.Button, binding: "<Keyboard>/e");
+        leanRightAction.AddBinding("<Gamepad>/rightShoulder");
     }
 
     private void OnEnable()
@@ -164,6 +185,8 @@ public class FirstPersonController : MonoBehaviour
         jumpAction?.Enable();
         sprintAction?.Enable();
         crouchAction?.Enable();
+        leanLeftAction?.Enable();
+        leanRightAction?.Enable();
         jumpAction.performed += OnJumpPressed;
     }
 
@@ -175,6 +198,8 @@ public class FirstPersonController : MonoBehaviour
         jumpAction?.Disable();
         sprintAction?.Disable();
         crouchAction?.Disable();
+        leanLeftAction?.Disable();
+        leanRightAction?.Disable();
     }
 
     private void OnJumpPressed(InputAction.CallbackContext ctx)
@@ -330,13 +355,44 @@ public class FirstPersonController : MonoBehaviour
 
         landingOffset = Mathf.Lerp(landingOffset, 0f, landingRecovery * Time.deltaTime);
 
+        float targetCrouchBlend = isCrouching ? 1f : 0f;
+        crouchBlend = Mathf.Lerp(crouchBlend, targetCrouchBlend, crouchCameraSmoothing * Time.deltaTime);
+        float crouchY = -crouchCameraDip * crouchBlend;
+
+        float leanInput = 0f;
+        if (!InputLocked)
+        {
+            if (leanLeftAction != null && leanLeftAction.IsPressed()) leanInput -= 1f;
+            if (leanRightAction != null && leanRightAction.IsPressed()) leanInput += 1f;
+        }
+
+        if (leanCollisionCheck && Mathf.Abs(leanInput) > 0.01f)
+        {
+            Vector3 worldOrigin = transform.TransformPoint(cameraBasePos + Vector3.up * crouchY);
+            Vector3 worldDir = transform.right * Mathf.Sign(leanInput);
+            float maxDist = Mathf.Abs(leanInput) * leanOffset;
+            if (Physics.SphereCast(worldOrigin, leanCollisionRadius, worldDir,
+                                   out RaycastHit hit, maxDist + leanCollisionRadius,
+                                   leanCollisionMask, QueryTriggerInteraction.Ignore))
+            {
+                float allowed = Mathf.Max(0f, hit.distance - leanCollisionRadius) / leanOffset;
+                leanInput = Mathf.Sign(leanInput) * Mathf.Clamp01(allowed);
+            }
+        }
+
+        currentLean = Mathf.Lerp(currentLean, leanInput, leanSmoothing * Time.deltaTime);
+        float leanX = currentLean * leanOffset;
+        float leanY = -Mathf.Abs(currentLean) * leanOffset * 0.12f;
+        float leanZRoll = -currentLean * leanAngle;
+
         cameraTransform.localPosition = cameraBasePos + bobOffset + swayOffset + idleOffset
-                                        + Vector3.up * landingOffset;
+                                        + Vector3.up * (landingOffset + crouchY + leanY)
+                                        + Vector3.right * leanX;
 
         float targetTilt = -input.x * strafeTiltAngle;
         if (!controller.isGrounded) targetTilt *= 0.4f;
         currentTilt = Mathf.Lerp(currentTilt, targetTilt, tiltSmoothing * Time.deltaTime);
-        cameraTransform.localRotation = Quaternion.Euler(pitch, 0f, currentTilt);
+        cameraTransform.localRotation = Quaternion.Euler(pitch, 0f, currentTilt + leanZRoll);
 
         if (cam != null)
         {

@@ -41,13 +41,36 @@ public class FirstPersonController : MonoBehaviour
     [SerializeField] private float crouchCameraDip = 0.7f;
     [SerializeField] private float crouchCameraSmoothing = 9f;
 
-    [Header("Lean (Q / E)")]
-    [SerializeField] private float leanAngle = 14f;
-    [SerializeField] private float leanOffset = 0.42f;
-    [SerializeField] private float leanSmoothing = 10f;
-    [SerializeField] private bool leanCollisionCheck = true;
-    [SerializeField] private float leanCollisionRadius = 0.2f;
-    [SerializeField] private LayerMask leanCollisionMask = ~0;
+    [Header("Slide (подкат на C во время бега)")]
+    [Tooltip("Начальная скорость подката.")]
+    [SerializeField] private float slideSpeed = 9f;
+    [Tooltip("Максимальная длительность подката (сек).")]
+    [SerializeField] private float slideDuration = 0.9f;
+    [Tooltip("Замедление подката со временем.")]
+    [SerializeField] private float slideFriction = 5f;
+    [Tooltip("Минимальная скорость, чтобы подкат начался.")]
+    [SerializeField] private float slideMinSpeed = 4f;
+    [Tooltip("Пауза между подкатами (сек).")]
+    [SerializeField] private float slideCooldown = 0.5f;
+    [Tooltip("Насколько можно подруливать в подкате.")]
+    [SerializeField] private float slideSteer = 2.5f;
+    [Tooltip("Наклон камеры в подкате (градусы).")]
+    [SerializeField] private float slideCameraTilt = 7f;
+    [Tooltip("Доп. опускание камеры в подкате.")]
+    [SerializeField] private float slideCameraDrop = 0.15f;
+
+    [Header("Start")]
+    [Tooltip("Прижать игрока к земле при старте (убирает падение капсулы в начале).")]
+    [SerializeField] private bool snapToGroundOnStart = true;
+    [SerializeField] private float snapMaxDistance = 6f;
+    [SerializeField] private LayerMask groundMask = ~0;
+
+    [Header("Push Physics (толкать предметы телом)")]
+    [SerializeField] private bool pushRigidbodies = true;
+    [Tooltip("Сила толчка предметов телом игрока.")]
+    [SerializeField] private float pushForce = 2.2f;
+    [Tooltip("Какие предметы можно толкать.")]
+    [SerializeField] private LayerMask pushMask = ~0;
 
     [Header("Head Bob")]
     [SerializeField] private float walkBobFrequency = 8.5f;
@@ -91,8 +114,6 @@ public class FirstPersonController : MonoBehaviour
     private InputAction jumpAction;
     private InputAction sprintAction;
     private InputAction crouchAction;
-    private InputAction leanLeftAction;
-    private InputAction leanRightAction;
 
     private Vector3 horizontalVelocity;
     private float verticalVelocity;
@@ -117,13 +138,24 @@ public class FirstPersonController : MonoBehaviour
     private float currentTilt;
     private float landingOffset;
     private float crouchBlend;
-    private float currentLean;
+    private float feetOffsetY;
+
+    private bool isSliding;
+    private float slideTimer;
+    private float slideCooldownTimer;
+    private Vector3 slideDir;
+    private float currentSlideSpeed;
+    private float slideTiltCurrent;
+    private float slideDropCurrent;
 
     private void Awake()
     {
         controller = GetComponent<CharacterController>();
+        // Запоминаем, где «ноги» (низ коллайдера) у настроенного контроллера,
+        // чтобы не сдвигать капсулу при старте независимо от origin меша.
+        feetOffsetY = controller.center.y - controller.height * 0.5f;
         controller.height = standHeight;
-        controller.center = new Vector3(0f, standHeight * 0.5f, 0f);
+        controller.center = new Vector3(controller.center.x, feetOffsetY + standHeight * 0.5f, controller.center.z);
 
         if (cameraTransform == null && Camera.main != null)
             cameraTransform = Camera.main.transform;
@@ -141,6 +173,49 @@ public class FirstPersonController : MonoBehaviour
 
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
+    }
+
+    private void Start()
+    {
+        if (snapToGroundOnStart) SnapToGround();
+    }
+
+    private void SnapToGround()
+    {
+        Vector3 origin = transform.position + Vector3.up * 1f;
+        bool wasEnabled = controller.enabled;
+        controller.enabled = false;
+        if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit,
+                            snapMaxDistance + 1f, groundMask, QueryTriggerInteraction.Ignore))
+        {
+            // низ коллайдера в мире = transform.position.y + feetOffsetY,
+            // ставим его ровно на землю
+            float targetY = hit.point.y - feetOffsetY + controller.skinWidth;
+            transform.position = new Vector3(transform.position.x, targetY, transform.position.z);
+        }
+        controller.enabled = wasEnabled;
+        verticalVelocity = 0f;
+    }
+
+    private void OnControllerColliderHit(ControllerColliderHit hit)
+    {
+        if (!pushRigidbodies) return;
+
+        Rigidbody body = hit.collider.attachedRigidbody;
+        if (body == null || body.isKinematic) return;
+        if ((pushMask.value & (1 << hit.collider.gameObject.layer)) == 0) return;
+
+        // не толкаем то, на чём стоим
+        if (hit.moveDirection.y < -0.3f) return;
+
+        Vector3 pushDir = new Vector3(hit.moveDirection.x, 0f, hit.moveDirection.z);
+        if (pushDir.sqrMagnitude < 0.001f) return;
+        pushDir.Normalize();
+
+        float playerSpeed = new Vector3(horizontalVelocity.x, 0f, horizontalVelocity.z).magnitude;
+        if (playerSpeed < 0.1f) return;
+
+        body.AddForceAtPosition(pushDir * pushForce * playerSpeed, hit.point, ForceMode.Impulse);
     }
 
     private void CreateInputActions()
@@ -170,12 +245,6 @@ public class FirstPersonController : MonoBehaviour
 
         crouchAction = new InputAction("Crouch", InputActionType.Button, binding: "<Keyboard>/c");
         crouchAction.AddBinding("<Gamepad>/buttonEast");
-
-        leanLeftAction = new InputAction("LeanLeft", InputActionType.Button, binding: "<Keyboard>/q");
-        leanLeftAction.AddBinding("<Gamepad>/leftShoulder");
-
-        leanRightAction = new InputAction("LeanRight", InputActionType.Button, binding: "<Keyboard>/e");
-        leanRightAction.AddBinding("<Gamepad>/rightShoulder");
     }
 
     private void OnEnable()
@@ -185,8 +254,6 @@ public class FirstPersonController : MonoBehaviour
         jumpAction?.Enable();
         sprintAction?.Enable();
         crouchAction?.Enable();
-        leanLeftAction?.Enable();
-        leanRightAction?.Enable();
         jumpAction.performed += OnJumpPressed;
     }
 
@@ -198,8 +265,6 @@ public class FirstPersonController : MonoBehaviour
         jumpAction?.Disable();
         sprintAction?.Disable();
         crouchAction?.Disable();
-        leanLeftAction?.Disable();
-        leanRightAction?.Disable();
     }
 
     private void OnJumpPressed(InputAction.CallbackContext ctx)
@@ -236,19 +301,21 @@ public class FirstPersonController : MonoBehaviour
 
     private void HandleCrouch()
     {
-        wantsCrouch = !InputLocked && crouchAction.IsPressed();
+        wantsCrouch = isSliding || (!InputLocked && crouchAction.IsPressed());
         if (!wantsCrouch && isCrouching && HasCeilingAbove()) wantsCrouch = true;
         isCrouching = wantsCrouch;
 
         float target = isCrouching ? crouchHeight : standHeight;
         controller.height = Mathf.Lerp(controller.height, target, crouchTransition * Time.deltaTime);
-        controller.center = new Vector3(0f, controller.height * 0.5f, 0f);
+        // ноги остаются на месте: низ = feetOffsetY
+        controller.center = new Vector3(controller.center.x, feetOffsetY + controller.height * 0.5f, controller.center.z);
     }
 
     private bool HasCeilingAbove()
     {
         float rayLength = standHeight - controller.height + 0.1f;
-        Vector3 origin = transform.position + Vector3.up * controller.height;
+        // макушка коллайдера в мире
+        Vector3 origin = transform.position + Vector3.up * (feetOffsetY + controller.height);
         return Physics.SphereCast(origin, controller.radius * 0.9f, Vector3.up,
                                   out _, rayLength, ceilingMask, QueryTriggerInteraction.Ignore);
     }
@@ -259,17 +326,36 @@ public class FirstPersonController : MonoBehaviour
         Vector3 wishDir = transform.right * input.x + transform.forward * input.y;
         if (wishDir.sqrMagnitude > 1f) wishDir.Normalize();
 
-        bool wantsSprint = !InputLocked && sprintAction.IsPressed() && !isCrouching && input.y > 0.1f;
+        bool grounded = controller.isGrounded;
+
+        if (slideCooldownTimer > 0f) slideCooldownTimer -= Time.deltaTime;
+
+        // --- Старт подката: бежишь + жмёшь присесть ---
+        float horizSpeed = new Vector3(horizontalVelocity.x, 0f, horizontalVelocity.z).magnitude;
+        if (!isSliding && grounded && !InputLocked && slideCooldownTimer <= 0f
+            && crouchAction.WasPressedThisFrame()
+            && sprintAction.IsPressed() && horizSpeed >= slideMinSpeed)
+        {
+            StartSlide();
+        }
+
+        bool wantsSprint = !InputLocked && sprintAction.IsPressed() && !isCrouching && !isSliding && input.y > 0.1f;
         float sprintTarget = wantsSprint ? 1f : 0f;
         sprintBlend = Mathf.MoveTowards(sprintBlend, sprintTarget, Time.deltaTime / Mathf.Max(0.01f, sprintRampTime));
 
-        float baseSpeed = isCrouching ? crouchSpeed : Mathf.Lerp(walkSpeed, sprintSpeed, sprintBlend);
-        Vector3 targetVel = wishDir * baseSpeed;
+        if (isSliding)
+        {
+            UpdateSlide(input, grounded);
+        }
+        else
+        {
+            float baseSpeed = isCrouching ? crouchSpeed : Mathf.Lerp(walkSpeed, sprintSpeed, sprintBlend);
+            Vector3 targetVel = wishDir * baseSpeed;
 
-        bool grounded = controller.isGrounded;
-        float accel = (targetVel.sqrMagnitude > 0.01f) ? groundAccel : groundDecel;
-        if (!grounded) accel *= airControl;
-        horizontalVelocity = Vector3.MoveTowards(horizontalVelocity, targetVel, accel * Time.deltaTime);
+            float accel = (targetVel.sqrMagnitude > 0.01f) ? groundAccel : groundDecel;
+            if (!grounded) accel *= airControl;
+            horizontalVelocity = Vector3.MoveTowards(horizontalVelocity, targetVel, accel * Time.deltaTime);
+        }
 
         if (grounded)
         {
@@ -285,8 +371,9 @@ public class FirstPersonController : MonoBehaviour
 
         bool canJump = (Time.time - lastGroundedTime) <= coyoteTime;
         bool jumpBuffered = (Time.time - lastJumpPressedTime) <= jumpBuffer;
-        if (canJump && jumpBuffered && !isCrouching && !InputLocked)
+        if (canJump && jumpBuffered && !InputLocked && (!isCrouching || isSliding))
         {
+            if (isSliding) EndSlide();
             verticalVelocity = Mathf.Sqrt(-2f * gravity * jumpHeight);
             lastJumpPressedTime = -999f;
             lastGroundedTime = -999f;
@@ -307,6 +394,41 @@ public class FirstPersonController : MonoBehaviour
         Vector3 motion = horizontalVelocity;
         motion.y = verticalVelocity;
         controller.Move(motion * Time.deltaTime);
+    }
+
+    private void StartSlide()
+    {
+        isSliding = true;
+        slideTimer = slideDuration;
+        slideDir = new Vector3(horizontalVelocity.x, 0f, horizontalVelocity.z).normalized;
+        if (slideDir.sqrMagnitude < 0.01f) slideDir = transform.forward;
+        currentSlideSpeed = Mathf.Max(slideSpeed, horizontalVelocity.magnitude);
+        sprintBlend = 0f;
+    }
+
+    private void UpdateSlide(Vector2 input, bool grounded)
+    {
+        slideTimer -= Time.deltaTime;
+        currentSlideSpeed -= slideFriction * Time.deltaTime;
+
+        // лёгкое подруливание
+        Vector3 steer = transform.right * input.x;
+        slideDir = Vector3.Slerp(slideDir, (slideDir + steer * 0.5f).normalized, slideSteer * Time.deltaTime);
+
+        horizontalVelocity = slideDir * currentSlideSpeed;
+
+        if (slideTimer <= 0f || currentSlideSpeed <= crouchSpeed || !grounded)
+            EndSlide();
+    }
+
+    private void EndSlide()
+    {
+        if (!isSliding) return;
+        isSliding = false;
+        slideCooldownTimer = slideCooldown;
+        // плавно гасим скорость до обычной
+        float keep = Mathf.Min(currentSlideSpeed, crouchSpeed);
+        horizontalVelocity = slideDir * keep;
     }
 
     private void HandleCameraEffects()
@@ -359,40 +481,19 @@ public class FirstPersonController : MonoBehaviour
         crouchBlend = Mathf.Lerp(crouchBlend, targetCrouchBlend, crouchCameraSmoothing * Time.deltaTime);
         float crouchY = -crouchCameraDip * crouchBlend;
 
-        float leanInput = 0f;
-        if (!InputLocked)
-        {
-            if (leanLeftAction != null && leanLeftAction.IsPressed()) leanInput -= 1f;
-            if (leanRightAction != null && leanRightAction.IsPressed()) leanInput += 1f;
-        }
-
-        if (leanCollisionCheck && Mathf.Abs(leanInput) > 0.01f)
-        {
-            Vector3 worldOrigin = transform.TransformPoint(cameraBasePos + Vector3.up * crouchY);
-            Vector3 worldDir = transform.right * Mathf.Sign(leanInput);
-            float maxDist = Mathf.Abs(leanInput) * leanOffset;
-            if (Physics.SphereCast(worldOrigin, leanCollisionRadius, worldDir,
-                                   out RaycastHit hit, maxDist + leanCollisionRadius,
-                                   leanCollisionMask, QueryTriggerInteraction.Ignore))
-            {
-                float allowed = Mathf.Max(0f, hit.distance - leanCollisionRadius) / leanOffset;
-                leanInput = Mathf.Sign(leanInput) * Mathf.Clamp01(allowed);
-            }
-        }
-
-        currentLean = Mathf.Lerp(currentLean, leanInput, leanSmoothing * Time.deltaTime);
-        float leanX = currentLean * leanOffset;
-        float leanY = -Mathf.Abs(currentLean) * leanOffset * 0.12f;
-        float leanZRoll = -currentLean * leanAngle;
+        // Подкат: наклон камеры + доп. опускание
+        float slideTiltTarget = isSliding ? slideCameraTilt : 0f;
+        float slideDropTarget = isSliding ? -slideCameraDrop : 0f;
+        slideTiltCurrent = Mathf.Lerp(slideTiltCurrent, slideTiltTarget, 8f * Time.deltaTime);
+        slideDropCurrent = Mathf.Lerp(slideDropCurrent, slideDropTarget, 8f * Time.deltaTime);
 
         cameraTransform.localPosition = cameraBasePos + bobOffset + swayOffset + idleOffset
-                                        + Vector3.up * (landingOffset + crouchY + leanY)
-                                        + Vector3.right * leanX;
+                                        + Vector3.up * (landingOffset + crouchY + slideDropCurrent);
 
         float targetTilt = -input.x * strafeTiltAngle;
         if (!controller.isGrounded) targetTilt *= 0.4f;
         currentTilt = Mathf.Lerp(currentTilt, targetTilt, tiltSmoothing * Time.deltaTime);
-        cameraTransform.localRotation = Quaternion.Euler(pitch, 0f, currentTilt + leanZRoll);
+        cameraTransform.localRotation = Quaternion.Euler(pitch, 0f, currentTilt + slideTiltCurrent);
 
         if (cam != null)
         {

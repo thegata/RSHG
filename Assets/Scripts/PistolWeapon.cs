@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.Rendering.HighDefinition;
@@ -18,10 +19,22 @@ public class PistolWeapon : MonoBehaviour
     [SerializeField] private float poseSmoothing = 16f;
     [SerializeField] private float adsFovMultiplier = 0.7f;
 
+    [Header("Holster (убрать в карман)")]
+    [Tooltip("Смещение позиции при убранном пистолете (поверх Hip Position).")]
+    [SerializeField] private Vector3 holsterOffset = new Vector3(0f, -0.45f, -0.18f);
+    [Tooltip("Доворот при убранном пистолете (поверх Hip Euler).")]
+    [SerializeField] private Vector3 holsterRotationOffset = new Vector3(72f, 0f, 0f);
+    [Tooltip("Скорость доставания/убирания.")]
+    [SerializeField] private float holsterSmoothing = 12f;
+    [Tooltip("Убран ли пистолет на старте.")]
+    [SerializeField] private bool startHolstered = false;
+
     [Header("Firing")]
     [SerializeField] private float fireRate = 7f;
     [SerializeField] private float bulletRange = 100f;
     [SerializeField] private LayerMask hitMask = ~0;
+    [Tooltip("Сила толчка, которую пуля придаёт физ-объектам (импульс).")]
+    [SerializeField] private float bulletImpactForce = 6f;
 
     [Header("Spread")]
     [SerializeField] private float hipSpread = 1.4f;
@@ -48,6 +61,20 @@ public class PistolWeapon : MonoBehaviour
     [SerializeField] private float bobAmplitude = 0.009f;
     [SerializeField] private float bobFrequency = 8f;
 
+    [Header("Look Sway (отставание при повороте камеры)")]
+    [Tooltip("Насколько ствол смещается вбок/вверх при повороте камеры.")]
+    [SerializeField] private float swayPositionAmount = 0.0016f;
+    [SerializeField] private float swayPositionMax = 0.03f;
+    [Tooltip("Насколько ствол доворачивается при повороте камеры (градусы).")]
+    [SerializeField] private float swayRotationAmount = 0.5f;
+    [SerializeField] private float swayRotationMax = 5f;
+    [Tooltip("Скорость возврата к центру. Меньше = ленивее, больше = жёстче.")]
+    [SerializeField] private float swaySmoothing = 9f;
+    [Tooltip("Во сколько раз слабее sway при прицеливании.")]
+    [SerializeField, Range(0f, 1f)] private float adsSwayMultiplier = 0.25f;
+    [Tooltip("Доворот ствола вбок при стрейфе (А/D).")]
+    [SerializeField] private float strafeSwayRoll = 2.2f;
+
     [Header("Ammo")]
     [SerializeField] private int magazineSize = 12;
     [SerializeField] private float reloadTime = 1.3f;
@@ -62,6 +89,13 @@ public class PistolWeapon : MonoBehaviour
     [SerializeField] private float impactLightIntensity = 800f;
     [SerializeField] private Color impactLightColor = new Color(1f, 0.7f, 0.3f);
     [SerializeField] private float impactDuration = 0.18f;
+
+    [Header("Bullet Holes")]
+    [SerializeField] private bool spawnBulletHoles = true;
+    [SerializeField] private float bulletHoleSize = 0.05f;
+    [SerializeField] private Color bulletHoleColor = Color.black;
+    [Tooltip("Максимум дырок одновременно. Старые удаляются.")]
+    [SerializeField] private int maxBulletHoles = 80;
 
     [Header("Audio")]
     [SerializeField] private AudioClip fireClip;
@@ -87,6 +121,13 @@ public class PistolWeapon : MonoBehaviour
     private int currentAmmo;
     private bool reloading;
 
+    private Vector3 lastCamEuler;
+    private bool hasCamEuler;
+    private Vector3 swayPos;
+    private Vector3 swayRot;
+    private bool isHolstered;
+    private InputAction holsterAction;
+
     private Light muzzleLight;
     private HDAdditionalLightData muzzleLightData;
 
@@ -94,6 +135,8 @@ public class PistolWeapon : MonoBehaviour
     public int MagazineSize => magazineSize;
     public bool IsReloading => reloading;
     public bool IsAds => isAds;
+    public static bool IsAiming { get; private set; }
+    public static bool IsPistolDrawn { get; private set; }
 
     private void Awake()
     {
@@ -123,6 +166,11 @@ public class PistolWeapon : MonoBehaviour
 
         reloadAction = new InputAction("Reload", InputActionType.Button, binding: "<Keyboard>/r");
         reloadAction.AddBinding("<Gamepad>/buttonWest");
+
+        holsterAction = new InputAction("Holster", InputActionType.Button, binding: "<Keyboard>/h");
+        holsterAction.AddBinding("<Gamepad>/dpad/down");
+
+        isHolstered = startHolstered;
     }
 
     private void SetupMuzzle()
@@ -159,17 +207,23 @@ public class PistolWeapon : MonoBehaviour
         fireAction?.Enable();
         adsAction?.Enable();
         reloadAction?.Enable();
+        holsterAction?.Enable();
         if (fireAction != null) fireAction.performed += OnFirePressed;
         if (reloadAction != null) reloadAction.performed += OnReloadPressed;
+        if (holsterAction != null) holsterAction.performed += OnHolsterPressed;
     }
 
     private void OnDisable()
     {
         if (fireAction != null) fireAction.performed -= OnFirePressed;
         if (reloadAction != null) reloadAction.performed -= OnReloadPressed;
+        if (holsterAction != null) holsterAction.performed -= OnHolsterPressed;
         fireAction?.Disable();
         adsAction?.Disable();
         reloadAction?.Disable();
+        holsterAction?.Disable();
+        IsPistolDrawn = false;
+        IsAiming = false;
     }
 
     private void OnDestroy()
@@ -177,19 +231,31 @@ public class PistolWeapon : MonoBehaviour
         fireAction?.Dispose();
         adsAction?.Dispose();
         reloadAction?.Dispose();
+        holsterAction?.Dispose();
     }
 
     private bool IsLocked() => controller != null && controller.InputLocked;
 
+    public bool IsHolstered => isHolstered;
+    public void SetHolstered(bool value) => isHolstered = value;
+    public void ToggleHolster() => isHolstered = !isHolstered;
+
+    private void OnHolsterPressed(InputAction.CallbackContext _)
+    {
+        if (IsLocked()) return;
+        isHolstered = !isHolstered;
+    }
+
     private void OnFirePressed(InputAction.CallbackContext _)
     {
-        if (IsLocked() || reloading) return;
+        if (IsLocked() || reloading || isHolstered) return;
+        if (PhysicsGrabber.IsAnyHeld) return;
         TryFire();
     }
 
     private void OnReloadPressed(InputAction.CallbackContext _)
     {
-        if (IsLocked() || reloading) return;
+        if (IsLocked() || reloading || isHolstered) return;
         if (currentAmmo < magazineSize) StartCoroutine(ReloadRoutine());
     }
 
@@ -222,7 +288,13 @@ public class PistolWeapon : MonoBehaviour
 
         Vector3 origin = cameraTransform.position;
         if (Physics.Raycast(origin, dir, out RaycastHit hit, bulletRange, hitMask, QueryTriggerInteraction.Ignore))
+        {
             SpawnImpact(hit.point, hit.normal);
+            SpawnBulletHole(hit);
+
+            if (hit.rigidbody != null && !hit.rigidbody.isKinematic)
+                hit.rigidbody.AddForceAtPosition(dir * bulletImpactForce, hit.point, ForceMode.Impulse);
+        }
 
         float pitchKick = recoilPitch * (isAds ? 0.55f : 1f);
         float yawKick = Random.Range(-recoilYawRandom, recoilYawRandom) * (isAds ? 0.5f : 1f);
@@ -286,6 +358,62 @@ public class PistolWeapon : MonoBehaviour
         StartCoroutine(FadeImpact(go, hd, impactDuration));
     }
 
+    private static Material sharedBulletHoleMat;
+    private static readonly Queue<GameObject> bulletHoles = new Queue<GameObject>();
+
+    private void SpawnBulletHole(RaycastHit hit)
+    {
+        if (!spawnBulletHoles) return;
+
+        if (sharedBulletHoleMat == null)
+        {
+            Shader sh = Shader.Find("HDRP/Unlit");
+            if (sh == null) sh = Shader.Find("Universal Render Pipeline/Unlit");
+            if (sh == null) sh = Shader.Find("Unlit/Color");
+            sharedBulletHoleMat = new Material(sh);
+            if (sharedBulletHoleMat.HasProperty("_UnlitColor")) sharedBulletHoleMat.SetColor("_UnlitColor", bulletHoleColor);
+            if (sharedBulletHoleMat.HasProperty("_BaseColor")) sharedBulletHoleMat.SetColor("_BaseColor", bulletHoleColor);
+            if (sharedBulletHoleMat.HasProperty("_Color")) sharedBulletHoleMat.SetColor("_Color", bulletHoleColor);
+        }
+
+        var hole = GameObject.CreatePrimitive(PrimitiveType.Quad);
+        hole.name = "BulletHole";
+        var col = hole.GetComponent<Collider>();
+        if (col != null) Destroy(col);
+
+        hole.transform.position = hit.point + hit.normal * 0.012f;
+        hole.transform.rotation = Quaternion.LookRotation(-hit.normal);
+
+        var rend = hole.GetComponent<Renderer>();
+        if (rend != null)
+        {
+            rend.sharedMaterial = sharedBulletHoleMat;
+            rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            rend.receiveShadows = false;
+        }
+
+        if (hit.collider != null)
+        {
+            hole.transform.SetParent(hit.collider.transform, true);
+            Vector3 ls = hit.collider.transform.lossyScale;
+            hole.transform.localScale = new Vector3(
+                bulletHoleSize / Mathf.Max(0.0001f, ls.x),
+                bulletHoleSize / Mathf.Max(0.0001f, ls.y),
+                bulletHoleSize / Mathf.Max(0.0001f, ls.z));
+        }
+        else
+        {
+            hole.transform.localScale = Vector3.one * bulletHoleSize;
+        }
+
+        bulletHoles.Enqueue(hole);
+        while (bulletHoles.Count > maxBulletHoles)
+        {
+            var old = bulletHoles.Dequeue();
+            if (old != null) Destroy(old);
+        }
+    }
+
     private IEnumerator FadeImpact(GameObject go, HDAdditionalLightData hd, float duration)
     {
         float t = 0f;
@@ -310,33 +438,90 @@ public class PistolWeapon : MonoBehaviour
         reloading = false;
     }
 
+    private void ComputeSway()
+    {
+        Vector3 camEuler = cameraTransform.eulerAngles;
+        if (!hasCamEuler) { lastCamEuler = camEuler; hasCamEuler = true; }
+
+        float dYaw = Mathf.DeltaAngle(lastCamEuler.y, camEuler.y);
+        float dPitch = Mathf.DeltaAngle(lastCamEuler.x, camEuler.x);
+        lastCamEuler = camEuler;
+
+        float dt = Mathf.Max(0.0001f, Time.deltaTime);
+        float yawV = dYaw / dt;
+        float pitchV = dPitch / dt;
+
+        float mult = isAds ? adsSwayMultiplier : 1f;
+
+        float strafe = 0f;
+        if (playerCC != null)
+        {
+            Vector3 localVel = cameraTransform.InverseTransformDirection(playerCC.velocity);
+            strafe = localVel.x;
+        }
+
+        Vector3 targetPos = new Vector3(
+            Mathf.Clamp(-yawV * swayPositionAmount, -swayPositionMax, swayPositionMax),
+            Mathf.Clamp(-pitchV * swayPositionAmount, -swayPositionMax, swayPositionMax),
+            0f) * mult;
+
+        Vector3 targetRot = new Vector3(
+            Mathf.Clamp(pitchV * swayRotationAmount, -swayRotationMax, swayRotationMax),
+            Mathf.Clamp(yawV * swayRotationAmount, -swayRotationMax, swayRotationMax),
+            Mathf.Clamp(-yawV * swayRotationAmount, -swayRotationMax, swayRotationMax) - strafe * strafeSwayRoll
+        ) * mult;
+
+        float s = 1f - Mathf.Exp(-swaySmoothing * Time.deltaTime);
+        swayPos = Vector3.Lerp(swayPos, targetPos, s);
+        swayRot = Vector3.Lerp(swayRot, targetRot, s);
+    }
+
     private void Update()
     {
         if (cameraTransform == null) return;
 
-        isAds = !IsLocked() && !reloading && adsAction.IsPressed();
+        isAds = !IsLocked() && !reloading && !isHolstered && adsAction.IsPressed();
+        IsAiming = isAds;
+        IsPistolDrawn = !isHolstered;
 
-        Vector3 targetPos = isAds ? adsPosition : hipPosition;
-        Vector3 targetEul = isAds ? adsEuler : hipEuler;
+        Vector3 targetPos;
+        Quaternion targetRot;
+        float k;
 
-        if (playerCC != null && playerCC.isGrounded && !isAds)
+        if (isHolstered)
         {
-            float speed = new Vector3(playerCC.velocity.x, 0f, playerCC.velocity.z).magnitude;
-            if (speed > 0.3f)
+            targetPos = hipPosition + holsterOffset;
+            targetRot = Quaternion.Euler(hipEuler + holsterRotationOffset);
+            k = 1f - Mathf.Exp(-holsterSmoothing * Time.deltaTime);
+        }
+        else
+        {
+            targetPos = isAds ? adsPosition : hipPosition;
+            Vector3 targetEul = isAds ? adsEuler : hipEuler;
+
+            if (playerCC != null && playerCC.isGrounded && !isAds)
             {
-                bobTimer += Time.deltaTime * bobFrequency;
-                targetPos += new Vector3(
-                    Mathf.Sin(bobTimer) * bobAmplitude * 0.5f,
-                    Mathf.Cos(bobTimer * 2f) * bobAmplitude,
-                    0f);
+                float speed = new Vector3(playerCC.velocity.x, 0f, playerCC.velocity.z).magnitude;
+                if (speed > 0.3f)
+                {
+                    bobTimer += Time.deltaTime * bobFrequency;
+                    targetPos += new Vector3(
+                        Mathf.Sin(bobTimer) * bobAmplitude * 0.5f,
+                        Mathf.Cos(bobTimer * 2f) * bobAmplitude,
+                        0f);
+                }
+                else bobTimer = Mathf.Lerp(bobTimer, 0f, Time.deltaTime * 5f);
             }
-            else bobTimer = Mathf.Lerp(bobTimer, 0f, Time.deltaTime * 5f);
+
+            ComputeSway();
+
+            targetPos += new Vector3(0f, 0f, -kickZ) + swayPos;
+            targetRot = Quaternion.Euler(targetEul)
+                        * Quaternion.Euler(-kickX, 0f, 0f)
+                        * Quaternion.Euler(swayRot);
+            k = 1f - Mathf.Exp(-poseSmoothing * Time.deltaTime);
         }
 
-        targetPos += new Vector3(0f, 0f, -kickZ);
-        Quaternion targetRot = Quaternion.Euler(targetEul) * Quaternion.Euler(-kickX, 0f, 0f);
-
-        float k = 1f - Mathf.Exp(-poseSmoothing * Time.deltaTime);
         transform.localPosition = Vector3.Lerp(transform.localPosition, targetPos, k);
         transform.localRotation = Quaternion.Slerp(transform.localRotation, targetRot, k);
 
@@ -378,17 +563,73 @@ public class PistolWeapon : MonoBehaviour
     private GUIStyle ammoShadowStyle;
     private GUIStyle hintStyle;
 
+    [Header("Crosshair (прицел пистолета)")]
+    [SerializeField] private float crosshairSize = 16f;
+    [SerializeField] private float crosshairThickness = 2f;
+    [Tooltip("Сколько штрихов в кольце. 0 = сплошное кольцо.")]
+    [SerializeField] private int crosshairDashes = 8;
+    [Tooltip("Доля промежутка между штрихами (0..1).")]
+    [SerializeField, Range(0f, 0.9f)] private float crosshairGapRatio = 0.5f;
+    private Texture2D crosshairTex;
+
+    private Texture2D GetCrosshairTexture()
+    {
+        if (crosshairTex != null) return crosshairTex;
+
+        int size = 128;
+        crosshairTex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        crosshairTex.filterMode = FilterMode.Bilinear;
+        crosshairTex.wrapMode = TextureWrapMode.Clamp;
+
+        float center = (size - 1) * 0.5f;
+        float outerR = size * 0.46f;
+        float ringPx = Mathf.Clamp(crosshairThickness, 1f, 20f) / Mathf.Max(1f, crosshairSize) * size;
+        float innerR = outerR - ringPx;
+        float aa = 1.5f;
+        float twoPi = Mathf.PI * 2f;
+
+        for (int y = 0; y < size; y++)
+        for (int x = 0; x < size; x++)
+        {
+            float dx = x - center, dy = y - center;
+            float dist = Mathf.Sqrt(dx * dx + dy * dy);
+            float outerEdge = Mathf.Clamp01((outerR - dist) / aa);
+            float innerEdge = Mathf.Clamp01((dist - innerR) / aa);
+            float alpha = Mathf.Clamp01(Mathf.Min(outerEdge, innerEdge));
+
+            if (crosshairDashes > 0 && alpha > 0f)
+            {
+                float ang = Mathf.Atan2(dy, dx) + Mathf.PI;
+                float seg = ang / twoPi * crosshairDashes;
+                float frac = seg - Mathf.Floor(seg);
+                float dashPart = 1f - crosshairGapRatio;
+                float edge = 0.06f;
+                float dashAlpha = Mathf.Clamp01(Mathf.Min(frac, dashPart - frac) / edge);
+                alpha *= dashAlpha;
+            }
+
+            crosshairTex.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+        }
+        crosshairTex.Apply();
+        return crosshairTex;
+    }
+
     private void OnGUI()
     {
         int w = Screen.width, h = Screen.height;
 
-        if (!isAds)
+        if (!isAds && !isHolstered)
         {
-            float s = 3f;
-            GUI.color = new Color(0f, 0f, 0f, 0.7f);
-            GUI.DrawTexture(new Rect(w * 0.5f - s - 1f, h * 0.5f - s - 1f, (s + 1f) * 2f, (s + 1f) * 2f), Texture2D.whiteTexture);
+            var tex = GetCrosshairTexture();
+            float sz = crosshairSize;
+            float cx = w * 0.5f, cy = h * 0.5f;
+
+            GUI.color = new Color(0f, 0f, 0f, 0.55f);
+            GUI.DrawTexture(new Rect(cx - sz * 0.5f + 1f, cy - sz * 0.5f + 1f, sz, sz), tex);
+
             GUI.color = Color.white;
-            GUI.DrawTexture(new Rect(w * 0.5f - s, h * 0.5f - s, s * 2f, s * 2f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(cx - sz * 0.5f, cy - sz * 0.5f, sz, sz), tex);
+            GUI.color = Color.white;
         }
 
         if (ammoStyle == null)
@@ -402,9 +643,20 @@ public class PistolWeapon : MonoBehaviour
                 fontSize = 18, alignment = TextAnchor.LowerRight,
             };
         }
-        ammoStyle.normal.textColor = reloading ? new Color(1f, 0.6f, 0.3f) : Color.white;
         ammoShadowStyle.normal.textColor = new Color(0f, 0f, 0f, 0.7f);
         hintStyle.normal.textColor = new Color(1f, 1f, 1f, 0.55f);
+
+        if (isHolstered)
+        {
+            ammoStyle.normal.textColor = new Color(1f, 1f, 1f, 0.5f);
+            var rh = new Rect(0, 0, w - 40, h - 30);
+            GUI.Label(new Rect(2, 2, w - 40, h - 30), "убран", ammoShadowStyle);
+            GUI.Label(rh, "убран", ammoStyle);
+            GUI.Label(new Rect(0, 0, w - 40, h - 80), "[H] достать пистолет", hintStyle);
+            return;
+        }
+
+        ammoStyle.normal.textColor = reloading ? new Color(1f, 0.6f, 0.3f) : Color.white;
 
         string ammoText = reloading ? "ПЕРЕЗАРЯДКА" : $"{currentAmmo} / {magazineSize}";
         var r = new Rect(0, 0, w - 40, h - 30);
@@ -413,6 +665,6 @@ public class PistolWeapon : MonoBehaviour
         GUI.Label(r, ammoText, ammoStyle);
 
         if (!reloading)
-            GUI.Label(new Rect(0, 0, w - 40, h - 80), "[ПКМ] прицел   [R] перезарядка", hintStyle);
+            GUI.Label(new Rect(0, 0, w - 40, h - 80), "[ПКМ] прицел   [R] перезарядка   [H] убрать", hintStyle);
     }
 }
